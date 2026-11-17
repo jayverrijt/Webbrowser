@@ -1,0 +1,7 @@
+{
+  "policies": {
+    "DisableTelemetry": true,
+    "DisablePocket": true,
+    "DontCheckDefaultBrowser": true
+  }
+}

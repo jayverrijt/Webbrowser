@@ -1,0 +1,110 @@
+name: CD - Browser E2E & Release Build
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'develop'
+  pull_request:
+    branches:
+      - 'main'
+      - 'develop'
+    paths:
+      - 'core/**'
+      - 'theme/**'
+      - 'extensions/**'
+      - 'scripts/**'
+      - 'tests/e2e/**'
+      - 'package*.json'
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-cross-platform:
+    name: E2E Browser Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies & Playwright Firefox
+        run: |
+          npm ci
+          npx playwright install firefox
+
+      - name: Build Favorites WebExtension (.xpi)
+        run: node scripts/build-extension.js
+
+      - name: Setup isolated test profile (Unix - macOS & Linux)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p /tmp/test-firefox-profile
+          chmod +x scripts/install.sh
+          ./scripts/install.sh --profile-dir /tmp/test-firefox-profile
+
+      - name: Setup isolated test profile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:TEMP\test-firefox-profile"
+          .\scripts\install.ps1 -ProfileDir "$env:TEMP\test-firefox-profile"
+
+      - name: Run E2E UI & Security Tests (Unix)
+        if: runner.os != 'Windows'
+        env:
+          TEST_PROFILE_DIR: /tmp/test-firefox-profile
+          TARGET_PLATFORM: ${{ runner.os }}
+        run: npm run test:e2e
+
+      - name: Run E2E UI & Security Tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TEST_PROFILE_DIR: ${{ runner.temp }}\test-firefox-profile
+          TARGET_PLATFORM: ${{ runner.os }}
+        run: npm run test:e2e
+
+      - name: Upload E2E failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-debug-${{ matrix.os }}-${{ github.run_id }}
+          path: test-results/
+          retention-days: 7
+
+  package-release:
+    name: Package Cross-Platform Release Bundle
+    runs-on: ubuntu-latest
+    needs: e2e-cross-platform
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build extension & create release archive
+        run: |
+          node scripts/build-extension.js
+          mkdir -p dist/bundle
+          cp -r core theme scripts dist/*.xpi dist/bundle/
+          cd dist/bundle && zip -r ../browser-crossplatform-bundle.zip .
+
+      - name: Upload Release Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-firefox-crossplatform-bundle
+          path: dist/browser-crossplatform-bundle.zip

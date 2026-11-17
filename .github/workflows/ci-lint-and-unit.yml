@@ -1,0 +1,99 @@
+name: CI - Lint, Security Config & Unit Tests
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'develop'
+      - 'feat/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'refactor/**'
+  pull_request:
+    branches:
+      - 'main'
+      - 'develop'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  branch-and-lint:
+    name: Branch Policy, Lint & Security Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate feature branch naming convention
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop'
+        run: |
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          if [[ ! "$BRANCH_NAME" =~ ^(feat|fix|chore|refactor)/[a-z0-9._-]+$ ]]; then
+            echo "Error: Branch '$BRANCH_NAME' must match ^(feat|fix|chore|refactor)/[a-z0-9._-]+$"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint CSS (userChrome, userContent & Sidebery)
+        run: npx stylelint "theme/**/*.css" "extensions/**/*.css" --allow-empty-input
+
+      - name: Lint JavaScript (Extension, Build Scripts & Tests)
+        run: npx eslint --no-error-on-unmatched-pattern "extensions/**/*.js" "scripts/**/*.js" "tests/**/*.js"
+
+      - name: Validate policies.json syntax & schema
+        run: |
+          node -e '
+            const fs = require("fs");
+            const policies = JSON.parse(fs.readFileSync("core/policies.json", "utf8"));
+            if (!policies.policies) {
+              throw new Error("Missing root \"policies\" key in core/policies.json");
+            }
+          '
+
+      - name: Verify critical cross-platform prefs in user.js
+        run: |
+          node -e '
+            const fs = require("fs");
+            const userJs = fs.readFileSync("core/user.js", "utf8");
+            const requiredPrefs = [
+              "toolkit.legacyUserProfileCustomizations.stylesheets",
+              "dom.security.https_only_mode"
+            ];
+            for (const pref of requiredPrefs) {
+              if (!userJs.includes(`user_pref("${pref}", true)`)) {
+                throw new Error(`Missing or disabled required pref: ${pref}`);
+              }
+            }
+          '
+
+  unit-tests:
+    name: Unit Tests (Favorites Logic & Keybinds)
+    runs-on: ubuntu-latest
+    needs: branch-and-lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm run test:unit
